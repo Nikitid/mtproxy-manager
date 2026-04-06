@@ -1,4 +1,4 @@
-<img width="1053" height="421" alt="image" src="https://github.com/user-attachments/assets/b3a2bd18-ef9e-4264-9a45-03dba2cd201c" />
+<img width="1902" height="986" alt="image" src="https://github.com/user-attachments/assets/cda53b3e-ffb1-457a-9793-e4afa475a92f" />
 
 # MTProxy Manager
 Built as a quick personal utility to simplify MTProxy deployment and maintenance.
