@@ -9,13 +9,12 @@ Built as a quick, personal tool to simplify MTProxy deployment and management.
 bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager/main/mtproxy-manager.sh)
 ```
 
-## Overview
-
-## Features
 ## Requirements
-## Quick Install
-## What the script does
-## File locations
-## Menu options
-## Security notes
-## Uninstall
+- Debian / Ubuntu
+- root access
+- open port (default and recommended 443)
+
+## Notes
+- Uses iptables for port opening
+- Installs MTProxy from official source
+- Stores config in /etc/mtproxy-manager
