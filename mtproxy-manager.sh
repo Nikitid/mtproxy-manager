@@ -255,13 +255,12 @@ configure_pid_max() {
 }
 
 show_pid_max_warning_if_needed() {
-  local current shell_pid
+  local current
   current="$(cat /proc/sys/kernel/pid_max 2>/dev/null || echo 0)"
-  shell_pid="$$"
 
-  if [[ "$current" =~ ^[0-9]+$ ]] && (( current <= PID_MAX_LIMIT )) && (( shell_pid > PID_MAX_LIMIT )); then
-    echo -e "${YELLOW}Warning:${NC} kernel.pid_max is fixed, but current PIDs are already above ${PID_MAX_LIMIT}."
-    echo -e "${YELLOW}If MTProxy still crashes with PID assertion, reboot the server once.${NC}"
+  if [[ "$current" =~ ^[0-9]+$ ]] && (( current > PID_MAX_LIMIT )); then
+    echo -e "${YELLOW}Warning:${NC} kernel.pid_max=${current}. MTProxy may crash with PID > ${PID_MAX_LIMIT}."
+    echo -e "${YELLOW}Recommended fix:${NC} set kernel.pid_max=${PID_MAX_LIMIT}"
     echo
   fi
 }
@@ -520,9 +519,13 @@ restart_or_start_service() {
 stop_service() {
   require_installed || return
 
-  systemctl stop "${SERVICE}"
+  if service_is_running; then
+    systemctl stop "${SERVICE}"
+    echo -e "${GREEN}Service stopped${NC}"
+  else
+    echo -e "${YELLOW}Service is already stopped${NC}"
+  fi
 
-  echo -e "${GREEN}Service stopped${NC}"
   sleep 2
 }
 
@@ -654,7 +657,7 @@ show_active_ips() {
 
 show_logs() {
   require_installed || return
-  journalctl -u "${SERVICE}" -n 50 --no-pager || true
+  journalctl -u "${SERVICE}" -b -n 50 --no-pager || true
   echo
   show_pid_max_warning_if_needed
   read -rp "Press Enter to continue..."
@@ -692,7 +695,7 @@ status_block() {
 }
 
 main_menu() {
-  local choice service_action
+  local choice
 
   while true; do
     clear
@@ -701,36 +704,56 @@ main_menu() {
 
     if is_installed; then
       if service_is_running; then
-        service_action="Restart proxy"
+        echo -e "${CYAN}1)${NC} Remove proxy"
+        echo -e "${CYAN}2)${NC} Restart proxy"
+        echo -e "${CYAN}3)${NC} Stop proxy"
+        echo -e "${CYAN}4)${NC} Update proxy"
+        echo -e "${CYAN}5)${NC} Change secret"
+        echo -e "${CYAN}6)${NC} Change TLS domain"
+        echo -e "${CYAN}7)${NC} Show active IPs"
+        echo -e "${CYAN}8)${NC} Show logs"
+        echo -e "${CYAN}0)${NC} Exit"
+        echo
+        echo -en "${YELLOW}Select:${NC} "
+        read -r choice
+
+        case "$choice" in
+          1) remove_mtproxy ;;
+          2) restart_or_start_service ;;
+          3) stop_service ;;
+          4) update_mtproxy ;;
+          5) change_secret ;;
+          6) change_tls_domain ;;
+          7) show_active_ips; echo; read -rp "Press Enter to continue..." ;;
+          8) show_logs ;;
+          0) exit 0 ;;
+          *) ;;
+        esac
       else
-        service_action="Start proxy"
+        echo -e "${CYAN}1)${NC} Remove proxy"
+        echo -e "${CYAN}2)${NC} Start proxy"
+        echo -e "${CYAN}3)${NC} Update proxy"
+        echo -e "${CYAN}4)${NC} Change secret"
+        echo -e "${CYAN}5)${NC} Change TLS domain"
+        echo -e "${CYAN}6)${NC} Show active IPs"
+        echo -e "${CYAN}7)${NC} Show logs"
+        echo -e "${CYAN}0)${NC} Exit"
+        echo
+        echo -en "${YELLOW}Select:${NC} "
+        read -r choice
+
+        case "$choice" in
+          1) remove_mtproxy ;;
+          2) restart_or_start_service ;;
+          3) update_mtproxy ;;
+          4) change_secret ;;
+          5) change_tls_domain ;;
+          6) show_active_ips; echo; read -rp "Press Enter to continue..." ;;
+          7) show_logs ;;
+          0) exit 0 ;;
+          *) ;;
+        esac
       fi
-
-      echo -e "${CYAN}1)${NC} Remove proxy"
-      echo -e "${CYAN}2)${NC} ${service_action}"
-      echo -e "${CYAN}3)${NC} Stop proxy"
-      echo -e "${CYAN}4)${NC} Update proxy"
-      echo -e "${CYAN}5)${NC} Change secret"
-      echo -e "${CYAN}6)${NC} Change TLS domain"
-      echo -e "${CYAN}7)${NC} Show active IPs"
-      echo -e "${CYAN}8)${NC} Show logs"
-      echo -e "${CYAN}0)${NC} Exit"
-      echo
-      echo -en "${YELLOW}Select:${NC} "
-      read -r choice
-
-      case "$choice" in
-        1) remove_mtproxy ;;
-        2) restart_or_start_service ;;
-        3) stop_service ;;
-        4) update_mtproxy ;;
-        5) change_secret ;;
-        6) change_tls_domain ;;
-        7) show_active_ips; echo; read -rp "Press Enter to continue..." ;;
-        8) show_logs ;;
-        0) exit 0 ;;
-        *) ;;
-      esac
     else
       echo -e "${CYAN}1)${NC} Install proxy"
       echo -e "${CYAN}0)${NC} Exit"
