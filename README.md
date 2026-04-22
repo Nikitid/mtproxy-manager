@@ -41,5 +41,5 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager/main
 Use only for testing.
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager/v1.2.0-beta.1/mtproxy-manager.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager/v1.2.0-beta.2/mtproxy-manager.sh)
 ```
