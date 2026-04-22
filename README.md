@@ -34,7 +34,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager/v1.1
 
 ### Latest (main)
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager)
+bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager/main/mtproxy-manager.sh)
 ```
 
 ### Pre-release / Beta
