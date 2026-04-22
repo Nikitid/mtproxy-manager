@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="v1.1"
+VERSION="v1.2"
 SERVICE="mtproxy"
 INSTALL_DIR="/opt/MTProxy"
 STATE_DIR="/etc/mtproxy-manager"
 CONFIG_FILE="$STATE_DIR/config"
 SECRET_FILE="$STATE_DIR/secret"
+SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
 
 DEFAULT_MT_PORT="443"
 DEFAULT_INTERNAL_PORT="8888"
@@ -32,13 +33,46 @@ ensure_root() {
   fi
 }
 
+check_supported_os() {
+  if [[ ! -r /etc/os-release ]]; then
+    echo -e "${RED}Unsupported OS${NC}"
+    exit 1
+  fi
+
+  # shellcheck source=/dev/null
+  source /etc/os-release
+
+  if [[ "${ID:-}" != "ubuntu" ]]; then
+    echo -e "${RED}Supported only on Ubuntu 22.04 or 24.04${NC}"
+    exit 1
+  fi
+
+  case "${VERSION_ID:-}" in
+    22.04|24.04) ;;
+    *)
+      echo -e "${RED}Supported only on Ubuntu 22.04 or 24.04${NC}"
+      exit 1
+      ;;
+  esac
+}
+
+warn_firewall_managers() {
+  if systemctl is-active --quiet ufw 2>/dev/null; then
+    echo -e "${YELLOW}Warning:${NC} ufw is active. This script supports direct iptables management only."
+  fi
+
+  if systemctl is-active --quiet firewalld 2>/dev/null; then
+    echo -e "${YELLOW}Warning:${NC} firewalld is active. This script supports direct iptables management only."
+  fi
+}
+
 init_dirs() {
   mkdir -p "$STATE_DIR"
   chmod 700 "$STATE_DIR"
 }
 
 is_installed() {
-  [[ -d "$INSTALL_DIR" && -f "/etc/systemd/system/${SERVICE}.service" ]]
+  [[ -d "$INSTALL_DIR" && -f "$SERVICE_FILE" ]]
 }
 
 require_installed() {
@@ -47,6 +81,25 @@ require_installed() {
     sleep 2
     return 1
   fi
+}
+
+load_from_service() {
+  local exec_line
+
+  [[ -f "$SERVICE_FILE" ]] || return 0
+
+  exec_line="$(sed -n 's/^ExecStart=//p' "$SERVICE_FILE" | head -n1)"
+  [[ -n "$exec_line" ]] || return 0
+
+  local parsed_mt_port parsed_internal_port parsed_tls_domain
+
+  parsed_mt_port="$(sed -n 's/.* -H \([0-9]\+\)\>.*/\1/p' <<<"$exec_line" | head -n1)"
+  parsed_internal_port="$(sed -n 's/.* -p \([0-9]\+\)\>.*/\1/p' <<<"$exec_line" | head -n1)"
+  parsed_tls_domain="$(sed -n 's/.* -D \([^ ]\+\)\>.*/\1/p' <<<"$exec_line" | head -n1)"
+
+  [[ -n "$parsed_mt_port" ]] && MT_PORT="$parsed_mt_port"
+  [[ -n "$parsed_internal_port" ]] && INTERNAL_PORT="$parsed_internal_port"
+  [[ -n "$parsed_tls_domain" ]] && TLS_DOMAIN="$parsed_tls_domain"
 }
 
 load_config() {
@@ -58,6 +111,8 @@ load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
+  else
+    load_from_service
   fi
 
   if [[ -f "$SECRET_FILE" ]]; then
@@ -93,32 +148,60 @@ download_file() {
 }
 
 get_server_ip() {
-  curl -4 -fsS ifconfig.me 2>/dev/null \
-    || curl -4 -fsS icanhazip.com 2>/dev/null \
-    || echo "YOUR_IP"
+  local ip
+
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == "src") {
+        print $(i+1)
+        exit
+      }
+    }
+  }')"
+
+  if [[ -n "$ip" ]]; then
+    printf '%s\n' "$ip"
+    return 0
+  fi
+
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if [[ -n "$ip" ]]; then
+    printf '%s\n' "$ip"
+    return 0
+  fi
+
+  return 1
 }
 
 build_link() {
   local ip domain_hex
-  ip="$(get_server_ip)"
+
+  ip="$(get_server_ip 2>/dev/null || true)"
+  ip="${ip:-YOUR_IP}"
+
   domain_hex="$(printf '%s' "$TLS_DOMAIN" | xxd -ps -c 999 | tr -d '\n')"
   echo "tg://proxy?server=${ip}&port=${MT_PORT}&secret=ee${SECRET}${domain_hex}"
 }
 
 check_tls_domain() {
   local domain="$1"
-  local tmp_out tmp_err
-  tmp_out="$(mktemp)"
-  tmp_err="$(mktemp)"
+  local tmp
 
-  if timeout 8 openssl s_client -connect "${domain}:443" -servername "$domain" </dev/null >"$tmp_out" 2>"$tmp_err"; then
-    if grep -q "BEGIN CERTIFICATE" "$tmp_out"; then
-      rm -f "$tmp_out" "$tmp_err"
+  tmp="$(mktemp)"
+
+  if timeout 8 openssl s_client \
+    -connect "${domain}:443" \
+    -servername "$domain" \
+    -verify_hostname "$domain" \
+    -verify_return_error \
+    </dev/null >"$tmp" 2>&1; then
+    if grep -q "Verify return code: 0 (ok)" "$tmp"; then
+      rm -f "$tmp"
       return 0
     fi
   fi
 
-  rm -f "$tmp_out" "$tmp_err"
+  rm -f "$tmp"
   return 1
 }
 
@@ -144,7 +227,7 @@ port_in_use() {
 check_required_commands() {
   local missing=()
 
-  for cmd in git make openssl timeout ss iptables systemctl xxd; do
+  for cmd in git make openssl timeout ss iptables systemctl xxd ip curl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing+=("$cmd")
     fi
@@ -152,13 +235,12 @@ check_required_commands() {
 
   if (( ${#missing[@]} > 0 )); then
     echo -e "${RED}Missing required commands:${NC} ${missing[*]}"
-    echo -e "${YELLOW}Install dependencies first or run installation on a Debian/Ubuntu system.${NC}"
     return 1
   fi
 }
 
 write_service() {
-  cat > "/etc/systemd/system/${SERVICE}.service" <<EOF
+  cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=MTProto Proxy
 Wants=network-online.target
@@ -167,6 +249,9 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
+ExecStartPre=/usr/bin/test -x ${INSTALL_DIR}/objs/bin/mtproto-proxy
+ExecStartPre=/usr/bin/test -f ${INSTALL_DIR}/proxy-secret
+ExecStartPre=/usr/bin/test -f ${INSTALL_DIR}/proxy-multi.conf
 ExecStart=${INSTALL_DIR}/objs/bin/mtproto-proxy -u nobody -p ${INTERNAL_PORT} -H ${MT_PORT} -S ${SECRET} -D ${TLS_DOMAIN} --aes-pwd ${INSTALL_DIR}/proxy-secret ${INSTALL_DIR}/proxy-multi.conf --max-accept-rate 1000 --max-dh-accept-rate 500 --msg-buffers-size 134217728 --http-stats
 Restart=always
 RestartSec=3
@@ -175,6 +260,12 @@ TimeoutStartSec=20
 LimitNOFILE=100000
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target
@@ -201,8 +292,8 @@ verify_service_started() {
 }
 
 ensure_firewall_rule() {
-  iptables -C INPUT -p tcp --dport "$MT_PORT" -j ACCEPT 2>/dev/null \
-    || iptables -I INPUT -p tcp --dport "$MT_PORT" -j ACCEPT
+  iptables -C INPUT -p tcp --dport "$MT_PORT" -m comment --comment "mtproxy-manager" -j ACCEPT 2>/dev/null \
+    || iptables -I INPUT -p tcp --dport "$MT_PORT" -m comment --comment "mtproxy-manager" -j ACCEPT
 
   if command -v netfilter-persistent >/dev/null 2>&1; then
     netfilter-persistent save >/dev/null 2>&1 || true
@@ -210,8 +301,8 @@ ensure_firewall_rule() {
 }
 
 remove_firewall_rule() {
-  while iptables -C INPUT -p tcp --dport "$MT_PORT" -j ACCEPT 2>/dev/null; do
-    iptables -D INPUT -p tcp --dport "$MT_PORT" -j ACCEPT || break
+  while iptables -C INPUT -p tcp --dport "$MT_PORT" -m comment --comment "mtproxy-manager" -j ACCEPT 2>/dev/null; do
+    iptables -D INPUT -p tcp --dport "$MT_PORT" -m comment --comment "mtproxy-manager" -j ACCEPT || break
   done
 
   if command -v netfilter-persistent >/dev/null 2>&1; then
@@ -257,14 +348,17 @@ prompt_install_settings() {
 
   echo -e "${WHITE}Checking TLS domain...${NC}"
   if ! check_tls_domain "$TLS_DOMAIN"; then
-    echo -e "${RED}Invalid TLS domain${NC}"
+    echo -e "${RED}Invalid TLS domain or certificate chain verification failed${NC}"
     return 1
   fi
 }
 
 install_packages() {
-  apt update -y || true
-  apt install -y git curl wget build-essential libssl-dev zlib1g-dev ca-certificates openssl xxd iptables iptables-persistent
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y \
+    git curl wget build-essential libssl-dev zlib1g-dev \
+    ca-certificates openssl xxd iptables iptables-persistent iproute2
 }
 
 install_mtproxy() {
@@ -274,10 +368,17 @@ install_mtproxy() {
   prompt_install_settings || { sleep 2; return; }
 
   install_packages
+  check_required_commands || { sleep 2; return; }
 
   rm -rf "$INSTALL_DIR"
-  git clone https://github.com/TelegramMessenger/MTProxy "$INSTALL_DIR"
+  git clone --depth 1 https://github.com/TelegramMessenger/MTProxy "$INSTALL_DIR"
   make -C "$INSTALL_DIR"
+
+  if [[ ! -x "${INSTALL_DIR}/objs/bin/mtproto-proxy" ]]; then
+    echo -e "${RED}Build failed: mtproto-proxy binary not found${NC}"
+    sleep 2
+    return
+  fi
 
   download_file "https://core.telegram.org/getProxySecret" "${INSTALL_DIR}/proxy-secret"
   download_file "https://core.telegram.org/getProxyConfig" "${INSTALL_DIR}/proxy-multi.conf"
@@ -307,12 +408,11 @@ install_mtproxy() {
 
 remove_mtproxy() {
   require_installed || return
-
   load_config
 
   systemctl stop "${SERVICE}" 2>/dev/null || true
   systemctl disable "${SERVICE}" 2>/dev/null || true
-  rm -f "/etc/systemd/system/${SERVICE}.service"
+  rm -f "$SERVICE_FILE"
 
   if [[ -n "${MT_PORT:-}" ]]; then
     remove_firewall_rule
@@ -327,6 +427,7 @@ remove_mtproxy() {
 
 restart_or_start_service() {
   require_installed || return
+  check_required_commands || { sleep 2; return; }
 
   if systemctl is-active --quiet "${SERVICE}"; then
     systemctl restart "${SERVICE}"
@@ -341,12 +442,28 @@ restart_or_start_service() {
   sleep 2
 }
 
+stop_service() {
+  require_installed || return
+
+  systemctl stop "${SERVICE}"
+
+  echo -e "${GREEN}Service stopped${NC}"
+  sleep 2
+}
+
 update_mtproxy() {
   require_installed || return
+  check_required_commands || { sleep 2; return; }
   load_config
 
   git -C "$INSTALL_DIR" pull --ff-only
   make -C "$INSTALL_DIR"
+
+  if [[ ! -x "${INSTALL_DIR}/objs/bin/mtproto-proxy" ]]; then
+    echo -e "${RED}Build failed: mtproto-proxy binary not found${NC}"
+    sleep 2
+    return
+  fi
 
   download_file "https://core.telegram.org/getProxySecret" "${INSTALL_DIR}/proxy-secret"
   download_file "https://core.telegram.org/getProxyConfig" "${INSTALL_DIR}/proxy-multi.conf"
@@ -422,7 +539,7 @@ change_tls_domain() {
       echo -e "${GREEN}TLS domain updated${NC}"
     fi
   else
-    echo -e "${RED}Invalid TLS domain${NC}"
+    echo -e "${RED}Invalid TLS domain or certificate chain verification failed${NC}"
   fi
 
   sleep 2
@@ -439,7 +556,7 @@ client_ip_count() {
   client_ips_raw | sort -u | wc -l
 }
 
-show_active_users() {
+show_active_ips() {
   require_installed || return
   load_config
 
@@ -447,16 +564,23 @@ show_active_users() {
   ss -Htn state established "( sport = :${MT_PORT} )" 2>/dev/null | wc -l
 
   echo
-  echo -e "${YELLOW}Unique IPs:${NC}"
+  echo -e "${YELLOW}Unique active IPs:${NC}"
   client_ip_count
 
   echo
-  echo -e "${YELLOW}Top IPs:${NC}"
+  echo -e "${YELLOW}Top client IPs:${NC}"
   client_ips_raw | sort | uniq -c | sort -nr | head -20
 
   echo
   echo -e "${YELLOW}Stats:${NC}"
   curl -fsS "http://127.0.0.1:${INTERNAL_PORT}/stats" | sed -n '1,20p' || echo "Stats unavailable"
+}
+
+show_logs() {
+  require_installed || return
+  journalctl -u "${SERVICE}" -n 50 --no-pager || true
+  echo
+  read -rp "Press Enter to continue..."
 }
 
 status_block() {
@@ -507,10 +631,12 @@ main_menu() {
 
       echo -e "${CYAN}1)${NC} Remove proxy"
       echo -e "${CYAN}2)${NC} ${service_action}"
-      echo -e "${CYAN}3)${NC} Update proxy"
-      echo -e "${CYAN}4)${NC} Change secret"
-      echo -e "${CYAN}5)${NC} Change TLS domain"
-      echo -e "${CYAN}6)${NC} Show active users"
+      echo -e "${CYAN}3)${NC} Stop proxy"
+      echo -e "${CYAN}4)${NC} Update proxy"
+      echo -e "${CYAN}5)${NC} Change secret"
+      echo -e "${CYAN}6)${NC} Change TLS domain"
+      echo -e "${CYAN}7)${NC} Show active IPs"
+      echo -e "${CYAN}8)${NC} Show logs"
       echo -e "${CYAN}0)${NC} Exit"
       echo
       echo -en "${YELLOW}Select:${NC} "
@@ -519,10 +645,12 @@ main_menu() {
       case "$choice" in
         1) remove_mtproxy ;;
         2) restart_or_start_service ;;
-        3) update_mtproxy ;;
-        4) change_secret ;;
-        5) change_tls_domain ;;
-        6) show_active_users; echo; read -rp "Press Enter to continue..." ;;
+        3) stop_service ;;
+        4) update_mtproxy ;;
+        5) change_secret ;;
+        6) change_tls_domain ;;
+        7) show_active_ips; echo; read -rp "Press Enter to continue..." ;;
+        8) show_logs ;;
         0) exit 0 ;;
         *) ;;
       esac
@@ -543,7 +671,8 @@ main_menu() {
 }
 
 ensure_root
+check_supported_os
+warn_firewall_managers
 init_dirs
 load_config
-check_required_commands || true
 main_menu
