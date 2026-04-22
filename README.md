@@ -1,34 +1,45 @@
 <img width="1902" height="986" alt="image" src="https://github.com/user-attachments/assets/cda53b3e-ffb1-457a-9793-e4afa475a92f" />
 
 # MTProxy Manager
-Built as a quick personal utility to simplify MTProxy deployment and maintenance.
+
+Interactive Bash manager for installing and managing Telegram MTProxy on **Ubuntu 22.04 / 24.04** servers.
+
+Built as a practical utility to simplify MTProxy deployment, updates, and routine maintenance with a small interactive menu.
+
+## Features
+
+- Install MTProxy from the official Telegram source
+- Start, restart, and stop the proxy
+- Update proxy binaries and Telegram config files
+- Change MTProxy secret
+- Change FakeTLS domain
+- Show active client IPs
+- View recent service logs
+- Create and manage a systemd service
+- Open the client port with iptables and persist the rule
+
+## Supported Systems
+
+- Ubuntu 22.04 LTS
+- Ubuntu 24.04 LTS
+- root access
+- iptables-based firewall management
 
 ## Quick Install
+
+### Stable
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager/main/mtproxy-manager.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager/v1.1/mtproxy-manager.sh)
 ```
 
-## Requirements
-- Debian / Ubuntu
-- root access
-- open port (default and recommended 443)
+### Latest (main)
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager
+```
 
-## Menu Options
-- Install proxy
-- Remove proxy
-- Start/Restart proxy
-- Update proxy
-- Change secret
-- Change TLS domain
-- Show active users
+### Pre-release / Beta
+Use only for testing.
 
-## File Locations
-- `/opt/MTProxy`
-- `/etc/mtproxy-manager/config`
-- `/etc/mtproxy-manager/secret`
-- `/etc/systemd/system/mtproxy.service`
-
-## Notes
-- Uses iptables for port opening
-- Installs MTProxy from official source
-- Stores config in /etc/mtproxy-manager
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Nikitid/mtproxy-manager/v1.2.0-beta.1/mtproxy-manager.sh)
+```
