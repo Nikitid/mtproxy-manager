@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="v1.2"
+APP_VERSION="v1.2"
 SERVICE="mtproxy"
 INSTALL_DIR="/opt/MTProxy"
 STATE_DIR="/etc/mtproxy-manager"
 CONFIG_FILE="$STATE_DIR/config"
 SECRET_FILE="$STATE_DIR/secret"
 SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+SYSCTL_FILE="/etc/sysctl.d/99-mtproxy.conf"
 
 DEFAULT_MT_PORT="443"
 DEFAULT_INTERNAL_PORT="8888"
 DEFAULT_TLS_DOMAIN="www.google.com"
+PID_MAX_LIMIT="65535"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -85,7 +87,6 @@ require_installed() {
 
 load_from_service() {
   local exec_line
-
   [[ -f "$SERVICE_FILE" ]] || return 0
 
   exec_line="$(sed -n 's/^ExecStart=//p' "$SERVICE_FILE" | head -n1)"
@@ -227,7 +228,7 @@ port_in_use() {
 check_required_commands() {
   local missing=()
 
-  for cmd in git make openssl timeout ss iptables systemctl xxd ip curl; do
+  for cmd in git make openssl timeout ss iptables systemctl xxd ip curl awk sed grep; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing+=("$cmd")
     fi
@@ -236,6 +237,32 @@ check_required_commands() {
   if (( ${#missing[@]} > 0 )); then
     echo -e "${RED}Missing required commands:${NC} ${missing[*]}"
     return 1
+  fi
+}
+
+configure_pid_max() {
+  local current
+  current="$(cat /proc/sys/kernel/pid_max 2>/dev/null || echo 0)"
+
+  if [[ ! "$current" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+
+  if (( current > PID_MAX_LIMIT )); then
+    printf 'kernel.pid_max=%s\n' "$PID_MAX_LIMIT" > "$SYSCTL_FILE"
+    sysctl -q -p "$SYSCTL_FILE" || true
+  fi
+}
+
+show_pid_max_warning_if_needed() {
+  local current shell_pid
+  current="$(cat /proc/sys/kernel/pid_max 2>/dev/null || echo 0)"
+  shell_pid="$$"
+
+  if [[ "$current" =~ ^[0-9]+$ ]] && (( current <= PID_MAX_LIMIT )) && (( shell_pid > PID_MAX_LIMIT )); then
+    echo -e "${YELLOW}Warning:${NC} kernel.pid_max is fixed, but current PIDs are already above ${PID_MAX_LIMIT}."
+    echo -e "${YELLOW}If MTProxy still crashes with PID assertion, reboot the server once.${NC}"
+    echo
   fi
 }
 
@@ -265,20 +292,64 @@ ProtectHome=true
 PrivateDevices=true
 ProtectControlGroups=true
 ProtectKernelTunables=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target
 EOF
 }
 
+get_service_status() {
+  local active_state sub_state
+
+  active_state="$(systemctl show -p ActiveState --value "${SERVICE}" 2>/dev/null || true)"
+  sub_state="$(systemctl show -p SubState --value "${SERVICE}" 2>/dev/null || true)"
+
+  if [[ -z "$active_state" ]]; then
+    echo "unknown"
+    return 0
+  fi
+
+  if [[ "$active_state" == "inactive" && "$sub_state" == "dead" ]]; then
+    echo "stopped"
+    return 0
+  fi
+
+  if [[ -n "$sub_state" ]]; then
+    echo "${active_state}/${sub_state}"
+  else
+    echo "$active_state"
+  fi
+}
+
+service_is_running() {
+  local active_state sub_state
+
+  active_state="$(systemctl show -p ActiveState --value "${SERVICE}" 2>/dev/null || true)"
+  sub_state="$(systemctl show -p SubState --value "${SERVICE}" 2>/dev/null || true)"
+
+  [[ "$active_state" == "active" && "$sub_state" == "running" ]]
+}
+
 verify_service_started() {
-  local attempts=10
+  local attempts=15
+  local stable=0
+  local active_state sub_state
 
   while (( attempts > 0 )); do
-    if systemctl is-active --quiet "${SERVICE}"; then
-      return 0
+    active_state="$(systemctl show -p ActiveState --value "${SERVICE}" 2>/dev/null || true)"
+    sub_state="$(systemctl show -p SubState --value "${SERVICE}" 2>/dev/null || true)"
+
+    if [[ "$active_state" == "active" && "$sub_state" == "running" ]]; then
+      ((stable++))
+      if (( stable >= 3 )); then
+        return 0
+      fi
+    elif [[ "$active_state" == "failed" || "$sub_state" == "failed" ]]; then
+      break
+    else
+      stable=0
     fi
+
     sleep 1
     ((attempts--))
   done
@@ -288,6 +359,8 @@ verify_service_started() {
   systemctl --no-pager --full status "${SERVICE}" || true
   echo
   journalctl -u "${SERVICE}" -n 30 --no-pager || true
+  echo
+  show_pid_max_warning_if_needed
   return 1
 }
 
@@ -369,6 +442,7 @@ install_mtproxy() {
 
   install_packages
   check_required_commands || { sleep 2; return; }
+  configure_pid_max
 
   rm -rf "$INSTALL_DIR"
   git clone --depth 1 https://github.com/TelegramMessenger/MTProxy "$INSTALL_DIR"
@@ -428,8 +502,9 @@ remove_mtproxy() {
 restart_or_start_service() {
   require_installed || return
   check_required_commands || { sleep 2; return; }
+  configure_pid_max
 
-  if systemctl is-active --quiet "${SERVICE}"; then
+  if service_is_running; then
     systemctl restart "${SERVICE}"
   else
     systemctl start "${SERVICE}"
@@ -455,6 +530,7 @@ update_mtproxy() {
   require_installed || return
   check_required_commands || { sleep 2; return; }
   load_config
+  configure_pid_max
 
   git -C "$INSTALL_DIR" pull --ff-only
   make -C "$INSTALL_DIR"
@@ -580,6 +656,7 @@ show_logs() {
   require_installed || return
   journalctl -u "${SERVICE}" -n 50 --no-pager || true
   echo
+  show_pid_max_warning_if_needed
   read -rp "Press Enter to continue..."
 }
 
@@ -588,7 +665,7 @@ status_block() {
 
   if is_installed; then
     install_status="installed"
-    service_status="$(systemctl is-active "${SERVICE}" 2>/dev/null || echo "stopped")"
+    service_status="$(get_service_status)"
     users="$(client_ip_count 2>/dev/null || echo 0)"
     link="$(build_link)"
   else
@@ -599,7 +676,7 @@ status_block() {
   fi
 
   echo -e "  ${CYAN}MTProxy Manager by Nikitid${NC}"
-  echo -e "                 ${VERSION}"
+  echo -e "                 ${APP_VERSION}"
   echo
 
   printf "${YELLOW}%-19s ${GREEN}%s${NC}\n" "Install status:" "$install_status"
@@ -623,7 +700,7 @@ main_menu() {
     status_block
 
     if is_installed; then
-      if systemctl is-active --quiet "${SERVICE}"; then
+      if service_is_running; then
         service_action="Restart proxy"
       else
         service_action="Start proxy"
